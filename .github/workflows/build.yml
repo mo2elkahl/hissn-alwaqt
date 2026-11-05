@@ -10,7 +10,7 @@ jobs:
           channel: 'stable'
       - run: flutter pub get
       - run: flutter build apk --release
-      - uses: upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: Hissn-AlWaqt-APK
           path: build/app/outputs/flutter-apk/app-release.apk
