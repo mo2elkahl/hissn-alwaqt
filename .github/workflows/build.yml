@@ -193,4 +193,35 @@ jobs:
               private fun checkForegroundApp() {
                   if (!hasUsageStatsPermission() || blockedPackages.isEmpty()) return
 
-                  val usm = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStats
+                  val usm = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+                  val time = System.currentTimeMillis()
+                  val stats = usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, time - 1000 * 10, time)
+
+                  if (stats != null && stats.isNotEmpty()) {
+                      val sortedStats = stats.sortedByDescending { it.lastTimeUsed }
+                      val currentPkg = sortedStats.firstOrNull()?.packageName ?: return
+
+                      if (currentPkg != packageName && blockedPackages.contains(currentPkg)) {
+                          val graceUntil = gracePeriods[currentPkg] ?: 0L
+                          if (time > graceUntil) {
+                              val launchIntent = Intent(this, MainActivity::class.java).apply {
+                                  addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                              }
+                              startActivity(launchIntent)
+                              methodChannel?.invokeMethod("onAppIntercepted", currentPkg)
+                          }
+                      }
+                  }
+              }
+          }
+          EOF
+
+          flutter pub get
+          flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v3
+        with:
+          name: app-release
+          path: build/app/outputs/flutter-apk/app-release.apk
+          
