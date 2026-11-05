@@ -220,8 +220,8 @@ jobs:
           flutter build apk --release
 
       - name: Upload APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
-          name: hissn-apk
+          name: apk
           path: build/app/outputs/flutter-apk/app-release.apk
           
