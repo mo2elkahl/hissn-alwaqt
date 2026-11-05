@@ -222,5 +222,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: apk
+          name: Hissn-AlWaqt-APK
           path: build/app/outputs/flutter-apk/app-release.apk
