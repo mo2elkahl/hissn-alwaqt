@@ -8,23 +8,210 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - uses: actions/setup-java@v3
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
-          java-version: '11'
-          
-      - uses: subosito/flutter-action@v2
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          
-      - name: Build
+
+      - name: Generate Project & Inject Android Code
         run: |
+          flutter create --org com.elkahlaoui --project-name hissn_alwaqt .
+          rm -rf test
+
+          cat << 'EOF' > android/app/src/main/AndroidManifest.xml
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:tools="http://schemas.android.com/tools">
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
+              <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.VIBRATE" />
+
+              <application
+                  android:label="حصن الوقت"
+                  android:name="${applicationName}"
+                  android:icon="@mipmap/ic_launcher">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:theme="@style/LaunchTheme"
+                      android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+                      android:hardwareAccelerated="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <meta-data
+                        android:name="io.flutter.embedding.android.NormalTheme"
+                        android:resource="@style/NormalTheme"
+                        />
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <meta-data
+                      android:name="flutterEmbedding"
+                      android:value="2" />
+              </application>
+          </manifest>
+          EOF
+
+          mkdir -p android/app/src/main/kotlin/com/elkahlaoui/hissn_alwaqt
+          cat << 'EOF' > android/app/src/main/kotlin/com/elkahlaoui/hissn_alwaqt/MainActivity.kt
+          package com.elkahlaoui.hissn_alwaqt
+
+          import android.app.AppOpsManager
+          import android.app.usage.UsageStatsManager
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.ApplicationInfo
+          import android.content.pm.PackageManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Handler
+          import android.os.Looper
+          import android.os.Process
+          import android.provider.Settings
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity: FlutterActivity() {
+              private val CHANNEL = "com.elkahlaoui.hissn_alwaqt/blocker"
+              private var methodChannel: MethodChannel? = null
+              private val handler = Handler(Looper.getMainLooper())
+              private var isMonitoring = false
+              private var blockedPackages = listOf<String>()
+              private var gracePeriods = mutableMapOf<String, Long>()
+              private var GraceDurationMs = 15 * 60 * 1000L
+
+              private val checkRunnable = object : Runnable {
+                  override fun run() {
+                      if (isMonitoring) {
+                          checkForegroundApp()
+                          handler.postDelayed(this, 1200)
+                      }
+                  }
+              }
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+                  methodChannel?.setMethodCallHandler { call, result ->
+                      when (call.method) {
+                          "checkPermissions" -> {
+                              val hasUsage = hasUsageStatsPermission()
+                              val hasOverlay = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Settings.canDrawOverlays(this) else true
+                              result.success(mapOf("usage" to hasUsage, "overlay" to hasOverlay))
+                          }
+                          "requestUsagePermission" -> {
+                              startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                              result.success(true)
+                          }
+                          "requestOverlayPermission" -> {
+                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                  val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+                                  startActivity(intent)
+                              }
+                              result.success(true)
+                          }
+                          "getInstalledApps" -> {
+                              result.success(getInstalledAppsList())
+                          }
+                          "updateBlockerConfig" -> {
+                              val apps = call.argument<List<String>>("blockedApps") ?: emptyList()
+                              val active = call.argument<Boolean>("isActive") ?: false
+                              val graceMins = call.argument<Int>("graceMinutes") ?: 15
+                              blockedPackages = apps
+                              GraceDurationMs = graceMins * 60 * 1000L
+                              if (active && !isMonitoring) {
+                                  isMonitoring = true
+                                  handler.post(checkRunnable)
+                              } else if (!active) {
+                                  isMonitoring = false
+                                  handler.removeCallbacks(checkRunnable)
+                              }
+                              result.success(true)
+                          }
+                          "unlockAppTemporarily" -> {
+                              val pkg = call.argument<String>("packageName")
+                              if (pkg != null) {
+                                  gracePeriods[pkg] = System.currentTimeMillis() + GraceDurationMs
+                              }
+                              result.success(true)
+                          }
+                          else -> result.notImplemented()
+                      }
+                  }
+              }
+
+              private fun hasUsageStatsPermission(): Boolean {
+                  val appOps = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+                  val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                      appOps.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName)
+                  } else {
+                      appOps.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName)
+                  }
+                  return mode == AppOpsManager.MODE_ALLOWED
+              }
+
+              private fun getInstalledAppsList(): List> {
+                  val pm = packageManager
+                  val packages = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+                  val appList = mutableListOf>()
+                  val popularSocial = listOf("instagram", "tiktok", "musically", "facebook", "twitter", "snapchat", "youtube", "whatsapp", "telegram", "reddit")
+
+                  for (appInfo in packages) {
+                      val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                      val pkgName = appInfo.packageName
+                      val isPopular = popularSocial.any { pkgName.lowercase().contains(it) }
+
+                      if ((!isSystem || isPopular) && pkgName != packageName) {
+                          val appName = pm.getApplicationLabel(appInfo).toString()
+                          appList.add(mapOf("name" to appName, "package" to pkgName))
+                      }
+                  }
+                  return appList.sortedBy { it["name"] }
+              }
+
+              private fun checkForegroundApp() {
+                  if (!hasUsageStatsPermission() || blockedPackages.isEmpty()) return
+
+                  val usm = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+                  val time = System.currentTimeMillis()
+                  val stats = usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, time - 1000 * 10, time)
+
+                  if (stats != null && stats.isNotEmpty()) {
+                      val sortedStats = stats.sortedByDescending { it.lastTimeUsed }
+                      val currentPkg = sortedStats.firstOrNull()?.packageName ?: return
+
+                      if (currentPkg != packageName && blockedPackages.contains(currentPkg)) {
+                          val graceUntil = gracePeriods[currentPkg] ?: 0L
+                          if (time > graceUntil) {
+                              val launchIntent = Intent(this, MainActivity::class.java).apply {
+                                  addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                              }
+                              startActivity(launchIntent)
+                              methodChannel?.invokeMethod("onAppIntercepted", currentPkg)
+                          }
+                      }
+                  }
+              }
+          }
+          EOF
+
           flutter pub get
           flutter build apk --release
-          
+
       - name: Upload APK
         uses: actions/upload-artifact@v3
         with:
